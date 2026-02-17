@@ -193,6 +193,10 @@ namespace Jellyfin.Plugin.AniList.Providers.AniList
 
             foreach (CharacterEdge edge in characters.edges)
             {
+                if (!Enum.TryParse(edge.role, true, out PersonRoleFilter role)
+                    || role > config.PersonRoleFilterPreference)
+                    continue;
+
                 foreach (Staff va in edge.voiceActors)
                 {
                     if (config.PersonLanguageFilterPreference != LanguageFilterType.All)
