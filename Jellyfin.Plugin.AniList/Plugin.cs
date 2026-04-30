@@ -27,7 +27,7 @@ namespace Jellyfin.Plugin.AniList
 
         public HttpClient GetHttpClient() {
             var httpClient = _httpClientFactory.CreateClient(NamedClient.Default);
-            httpClient.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue(Name, Version.ToString()));
+            // httpClient.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue(Name, Version.ToString()));
 
             return httpClient;
         }
