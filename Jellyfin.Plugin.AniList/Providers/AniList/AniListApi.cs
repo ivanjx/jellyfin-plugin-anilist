@@ -8,6 +8,7 @@ using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Extensions;
+using Microsoft.Extensions.Logging;
 
 namespace Jellyfin.Plugin.AniList.Providers.AniList
 {
@@ -20,6 +21,7 @@ namespace Jellyfin.Plugin.AniList.Providers.AniList
     public class AniListApi
     {
         private const string BaseApiUrl = "https://graphql.anilist.co/";
+        private readonly ILogger _logger;
 
         private const string SearchAnimeGraphqlQuery = """
             query ($query: String) {
@@ -202,6 +204,11 @@ namespace Jellyfin.Plugin.AniList.Providers.AniList
             public Dictionary<string, string> Variables { get; set; }
         }
 
+        public AniListApi(ILogger logger = null)
+        {
+            _logger = logger;
+        }
+
         /// <summary>
         /// API call to get the anime with the given id
         /// </summary>
@@ -217,7 +224,12 @@ namespace Jellyfin.Plugin.AniList.Providers.AniList
                 cancellationToken
             ).ConfigureAwait(false);
 
-            return result.data?.Media;
+            if (result?.data?.Media is null)
+            {
+                _logger?.LogError("AniList returned no media payload for id {Id}.", id);
+            }
+
+            return result?.data?.Media;
         }
 
         /// <summary>
@@ -247,7 +259,12 @@ namespace Jellyfin.Plugin.AniList.Providers.AniList
                 cancellationToken
             ).ConfigureAwait(false);
 
-            return result.data.Page.media;
+            if (result?.data?.Page?.media is null)
+            {
+                _logger?.LogError("AniList search response contained no media list for query {Title}.", title);
+            }
+
+            return result?.data?.Page?.media ?? [];
         }
 
         /// <summary>
@@ -282,7 +299,12 @@ namespace Jellyfin.Plugin.AniList.Providers.AniList
                 cancellationToken
             ).ConfigureAwait(false);
 
-            return result.data?.Staff;
+            if (result?.data?.Staff is null)
+            {
+                _logger?.LogError("AniList returned no staff payload for id {Id}.", id);
+            }
+
+            return result?.data?.Staff;
         }
 
         public async Task<List<Staff>> SearchStaff(string query, CancellationToken cancellationToken)
@@ -295,7 +317,12 @@ namespace Jellyfin.Plugin.AniList.Providers.AniList
                 cancellationToken
             ).ConfigureAwait(false);
 
-            return result.data?.Page.staff;
+            if (result?.data?.Page?.staff is null)
+            {
+                _logger?.LogWarning("AniList search response contained no staff list for query {Query}.", query);
+            }
+
+            return result?.data?.Page?.staff ?? [];
         }
 
         /// <summary>
@@ -309,9 +336,32 @@ namespace Jellyfin.Plugin.AniList.Providers.AniList
 
             using HttpContent content = new StringContent(JsonSerializer.Serialize(request), Encoding.UTF8, "application/json");
             using var response = await httpClient.PostAsync(BaseApiUrl, content, cancellationToken).ConfigureAwait(false);
-            using var responseStream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+            string responseBody = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
 
-            return await JsonSerializer.DeserializeAsync<RootObject>(responseStream, cancellationToken: cancellationToken).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger?.LogError(
+                    "AniList request failed with status code {StatusCode}. Response: {ResponseBody}",
+                    (int)response.StatusCode,
+                    responseBody);
+                return new RootObject();
+            }
+
+            if (string.IsNullOrWhiteSpace(responseBody))
+            {
+                _logger?.LogError("AniList request returned an empty response body.");
+                return new RootObject();
+            }
+
+            RootObject result = JsonSerializer.Deserialize<RootObject>(responseBody);
+
+            if (result is null)
+            {
+                _logger?.LogError("AniList response body could not be deserialized. Response: {ResponseBody}", responseBody);
+                return new RootObject();
+            }
+
+            return result;
         }
     }
 }
