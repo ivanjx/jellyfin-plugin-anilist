@@ -357,7 +357,7 @@ namespace Jellyfin.Plugin.AniList.Providers.AniList
                         var rateLimitDelay = delayBetweenRequests - (DateTimeOffset.UtcNow - _lastRequestAt);
                         if (rateLimitDelay > TimeSpan.Zero)
                         {
-                            _logger?.LogInformation("Waiting {Delay} seconds for rate limit.", rateLimitDelay.TotalSeconds);
+                            _logger?.LogInformation("Waiting {Delay} ms for rate limit.", rateLimitDelay.TotalMilliseconds);
                             await Task.Delay(rateLimitDelay, cancellationToken).ConfigureAwait(false);
                         }
                     }
@@ -389,7 +389,7 @@ namespace Jellyfin.Plugin.AniList.Providers.AniList
                         retryDelay = TimeSpan.FromSeconds(60);
                     }
 
-                    _logger?.LogInformation("Rate limited by AniList API. Retrying after {RetryDelay} seconds.", retryDelay.TotalSeconds);
+                    _logger?.LogInformation("Rate limited by AniList API. Retrying after {RetryDelay} ms.", retryDelay.TotalMilliseconds);
                     await Task.Delay(retryDelay, cancellationToken).ConfigureAwait(false);
                 }
             }
