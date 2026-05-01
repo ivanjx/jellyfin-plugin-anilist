@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Net;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
@@ -308,15 +309,61 @@ namespace Jellyfin.Plugin.AniList.Providers.AniList
         /// <returns></returns>
         private async Task<RootObject> WebRequestAPI(GraphQlRequest request, CancellationToken cancellationToken)
         {
-            await WaitForRateLimit(cancellationToken).ConfigureAwait(false);
-
             var httpClient = Plugin.Instance.GetHttpClient();
+            var requestBody = JsonSerializer.Serialize(request);
+            string responseBody = null;
+            bool success = false;
 
-            using HttpContent content = new StringContent(JsonSerializer.Serialize(request), Encoding.UTF8, "application/json");
-            using var response = await httpClient.PostAsync(BaseApiUrl, content, cancellationToken).ConfigureAwait(false);
-            using var responseStream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+            for (var attempt = 0; attempt < 2; attempt++)
+            {
+                await WaitForRateLimit(cancellationToken).ConfigureAwait(false);
 
-            return await JsonSerializer.DeserializeAsync<RootObject>(responseStream, cancellationToken: cancellationToken).ConfigureAwait(false);
+                using HttpContent content = new StringContent(requestBody, Encoding.UTF8, "application/json");
+                using var response = await httpClient.PostAsync(BaseApiUrl, content, cancellationToken).ConfigureAwait(false);
+                responseBody = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+                success = response.IsSuccessStatusCode;
+
+                if (success ||
+                    response.StatusCode != HttpStatusCode.TooManyRequests)
+                {
+                    break;
+                }
+
+                var delay = response.Headers.RetryAfter?.Delta;
+                if (delay is null &&
+                    response.Headers.RetryAfter?.Date is { } retryAfterDate)
+                {
+                    delay = retryAfterDate - DateTimeOffset.UtcNow;
+                }
+
+                var retryDelay = delay.GetValueOrDefault(TimeSpan.FromSeconds(60));
+                if (retryDelay <= TimeSpan.Zero)
+                {
+                    // If the Retry-After header is missing or invalid, default to a 60 second delay
+                    retryDelay = TimeSpan.FromSeconds(60);
+                }
+
+                await Task.Delay(retryDelay, cancellationToken).ConfigureAwait(false);
+            }
+
+            if (!success)
+            {
+                return new RootObject();
+            }
+
+            if (string.IsNullOrWhiteSpace(responseBody))
+            {
+                return new RootObject();
+            }
+
+            RootObject result = JsonSerializer.Deserialize<RootObject>(responseBody);
+
+            if (result is null)
+            {
+                return new RootObject();
+            }
+
+            return result;
         }
 
         private async Task WaitForRateLimit(CancellationToken cancellationToken)
