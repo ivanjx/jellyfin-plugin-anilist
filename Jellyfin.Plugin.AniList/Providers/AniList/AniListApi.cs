@@ -10,6 +10,7 @@ using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Extensions;
+using Microsoft.Extensions.Logging;
 
 namespace Jellyfin.Plugin.AniList.Providers.AniList
 {
@@ -24,6 +25,7 @@ namespace Jellyfin.Plugin.AniList.Providers.AniList
         private const string BaseApiUrl = "https://graphql.anilist.co/";
         private static readonly SemaphoreSlim _rateLimitLock = new(1, 1);
         private static DateTimeOffset _nextRequestAt = DateTimeOffset.MinValue;
+        private readonly ILogger _logger;
 
         private const string SearchAnimeGraphqlQuery = """
             query ($query: String) {
@@ -206,6 +208,11 @@ namespace Jellyfin.Plugin.AniList.Providers.AniList
             public Dictionary<string, string> Variables { get; set; }
         }
 
+        public AniListApi(ILogger logger = null)
+        {
+            _logger = logger;
+        }
+
         /// <summary>
         /// API call to get the anime with the given id
         /// </summary>
@@ -343,6 +350,7 @@ namespace Jellyfin.Plugin.AniList.Providers.AniList
                     retryDelay = TimeSpan.FromSeconds(60);
                 }
 
+                _logger?.LogInformation("Rate limited by AniList API. Retrying after {RetryDelay} seconds.", retryDelay.TotalSeconds);
                 await Task.Delay(retryDelay, cancellationToken).ConfigureAwait(false);
             }
 
@@ -383,6 +391,7 @@ namespace Jellyfin.Plugin.AniList.Providers.AniList
                 if (_nextRequestAt > now)
                 {
                     var delay = _nextRequestAt - now;
+                    _logger?.LogInformation("Waiting {Delay} seconds for rate limit.", delay.TotalSeconds);
                     await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
                     now = DateTimeOffset.UtcNow;
                 }
