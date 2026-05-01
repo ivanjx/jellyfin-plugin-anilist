@@ -24,7 +24,7 @@ namespace Jellyfin.Plugin.AniList.Providers.AniList
     {
         private const string BaseApiUrl = "https://graphql.anilist.co/";
         private static readonly SemaphoreSlim _rateLimitLock = new(1, 1);
-        private static DateTimeOffset _nextRequestAt = DateTimeOffset.MinValue;
+        private static DateTimeOffset _lastRequestAt = DateTimeOffset.MinValue;
         private readonly ILogger _logger;
 
         private const string SearchAnimeGraphqlQuery = """
@@ -320,39 +320,62 @@ namespace Jellyfin.Plugin.AniList.Providers.AniList
             var requestBody = JsonSerializer.Serialize(request);
             string responseBody = null;
             bool success = false;
+            var requestsPerMinute = Plugin.Instance.Configuration.AniDbRateLimit;
+            var delayBetweenRequests = requestsPerMinute > 0 ?
+                TimeSpan.FromMinutes(1d / requestsPerMinute) :
+                TimeSpan.Zero;
 
-            for (var attempt = 0; attempt < 2; attempt++)
+            await _rateLimitLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+
+            try
             {
-                await WaitForRateLimit(cancellationToken).ConfigureAwait(false);
-
-                using HttpContent content = new StringContent(requestBody, Encoding.UTF8, "application/json");
-                using var response = await httpClient.PostAsync(BaseApiUrl, content, cancellationToken).ConfigureAwait(false);
-                responseBody = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-                success = response.IsSuccessStatusCode;
-
-                if (success ||
-                    response.StatusCode != HttpStatusCode.TooManyRequests)
+                for (var attempt = 0; attempt < 2; attempt++)
                 {
-                    break;
-                }
+                    if (delayBetweenRequests > TimeSpan.Zero &&
+                        _lastRequestAt > DateTimeOffset.MinValue)
+                    {
+                        var rateLimitDelay = delayBetweenRequests - (DateTimeOffset.UtcNow - _lastRequestAt);
+                        if (rateLimitDelay > TimeSpan.Zero)
+                        {
+                            _logger?.LogInformation("Waiting {Delay} seconds for rate limit.", rateLimitDelay.TotalSeconds);
+                            await Task.Delay(rateLimitDelay, cancellationToken).ConfigureAwait(false);
+                        }
+                    }
 
-                var delay = response.Headers.RetryAfter?.Delta;
-                if (delay is null &&
-                    response.Headers.RetryAfter?.Date is { } retryAfterDate)
-                {
-                    delay = retryAfterDate - DateTimeOffset.UtcNow;
-                }
+                    _lastRequestAt = DateTimeOffset.UtcNow;
+                    using HttpContent content = new StringContent(requestBody, Encoding.UTF8, "application/json");
+                    using var response = await httpClient.PostAsync(BaseApiUrl, content, cancellationToken).ConfigureAwait(false);
+                    responseBody = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+                    success = response.IsSuccessStatusCode;
 
-                var retryDelay = delay.GetValueOrDefault(TimeSpan.FromSeconds(60));
-                if (retryDelay <= TimeSpan.Zero)
-                {
-                    // If the Retry-After header is missing or invalid, default to a 60 second delay
-                    retryDelay = TimeSpan.FromSeconds(60);
-                }
+                    if (success ||
+                        response.StatusCode != HttpStatusCode.TooManyRequests)
+                    {
+                        break;
+                    }
 
-                await SetNextRequestAfter(retryDelay, cancellationToken).ConfigureAwait(false);
-                _logger?.LogInformation("Rate limited by AniList API. Retrying after {RetryDelay} seconds.", retryDelay.TotalSeconds);
-                await Task.Delay(retryDelay, cancellationToken).ConfigureAwait(false);
+                    // Got HTTP 429 response
+                    var delay = response.Headers.RetryAfter?.Delta;
+                    if (delay is null &&
+                        response.Headers.RetryAfter?.Date is { } retryAfterDate)
+                    {
+                        delay = retryAfterDate - DateTimeOffset.UtcNow;
+                    }
+
+                    var retryDelay = delay.GetValueOrDefault(TimeSpan.FromSeconds(60));
+                    if (retryDelay <= TimeSpan.Zero)
+                    {
+                        // If the Retry-After header is missing or invalid, default to a 60 second delay
+                        retryDelay = TimeSpan.FromSeconds(60);
+                    }
+
+                    _logger?.LogInformation("Rate limited by AniList API. Retrying after {RetryDelay} seconds.", retryDelay.TotalSeconds);
+                    await Task.Delay(retryDelay, cancellationToken).ConfigureAwait(false);
+                }
+            }
+            finally
+            {
+                _rateLimitLock.Release();
             }
 
             if (!success)
@@ -373,54 +396,6 @@ namespace Jellyfin.Plugin.AniList.Providers.AniList
             }
 
             return result;
-        }
-
-        private async Task WaitForRateLimit(CancellationToken cancellationToken)
-        {
-            var requestsPerMinute = Plugin.Instance.Configuration.AniDbRateLimit;
-            if (requestsPerMinute <= 0)
-            {
-                return;
-            }
-
-            var delayBetweenRequests = TimeSpan.FromMinutes(1d / requestsPerMinute);
-            await _rateLimitLock.WaitAsync(cancellationToken).ConfigureAwait(false);
-
-            try
-            {
-                var now = DateTimeOffset.UtcNow;
-                if (_nextRequestAt > now)
-                {
-                    var delay = _nextRequestAt - now;
-                    _logger?.LogInformation("Waiting {Delay} seconds for rate limit.", delay.TotalSeconds);
-                    await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
-                    now = DateTimeOffset.UtcNow;
-                }
-
-                _nextRequestAt = now + delayBetweenRequests;
-            }
-            finally
-            {
-                _rateLimitLock.Release();
-            }
-        }
-
-        private static async Task SetNextRequestAfter(TimeSpan delay, CancellationToken cancellationToken)
-        {
-            await _rateLimitLock.WaitAsync(cancellationToken).ConfigureAwait(false);
-
-            try
-            {
-                var retryAfter = DateTimeOffset.UtcNow + delay;
-                if (_nextRequestAt < retryAfter)
-                {
-                    _nextRequestAt = retryAfter;
-                }
-            }
-            finally
-            {
-                _rateLimitLock.Release();
-            }
         }
     }
 }
