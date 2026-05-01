@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
@@ -20,6 +21,8 @@ namespace Jellyfin.Plugin.AniList.Providers.AniList
     public class AniListApi
     {
         private const string BaseApiUrl = "https://graphql.anilist.co/";
+        private static readonly SemaphoreSlim _rateLimitLock = new(1, 1);
+        private static DateTimeOffset _nextRequestAt = DateTimeOffset.MinValue;
 
         private const string SearchAnimeGraphqlQuery = """
             query ($query: String) {
@@ -305,6 +308,8 @@ namespace Jellyfin.Plugin.AniList.Providers.AniList
         /// <returns></returns>
         private async Task<RootObject> WebRequestAPI(GraphQlRequest request, CancellationToken cancellationToken)
         {
+            await WaitForRateLimit(cancellationToken).ConfigureAwait(false);
+
             var httpClient = Plugin.Instance.GetHttpClient();
 
             using HttpContent content = new StringContent(JsonSerializer.Serialize(request), Encoding.UTF8, "application/json");
@@ -312,6 +317,35 @@ namespace Jellyfin.Plugin.AniList.Providers.AniList
             using var responseStream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
 
             return await JsonSerializer.DeserializeAsync<RootObject>(responseStream, cancellationToken: cancellationToken).ConfigureAwait(false);
+        }
+
+        private async Task WaitForRateLimit(CancellationToken cancellationToken)
+        {
+            var requestsPerMinute = Plugin.Instance.Configuration.AniDbRateLimit;
+            if (requestsPerMinute <= 0)
+            {
+                return;
+            }
+
+            var delayBetweenRequests = TimeSpan.FromMinutes(1d / requestsPerMinute);
+            await _rateLimitLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+
+            try
+            {
+                var now = DateTimeOffset.UtcNow;
+                if (_nextRequestAt > now)
+                {
+                    var delay = _nextRequestAt - now;
+                    await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
+                    now = DateTimeOffset.UtcNow;
+                }
+
+                _nextRequestAt = now + delayBetweenRequests;
+            }
+            finally
+            {
+                _rateLimitLock.Release();
+            }
         }
     }
 }

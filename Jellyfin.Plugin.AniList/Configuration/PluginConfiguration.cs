@@ -51,7 +51,7 @@ namespace Jellyfin.Plugin.AniList.Configuration
             MinTagRank = 0;
             AnimeDefaultGenre = AnimeDefaultGenreType.Anime;
             StudioFilterPreference = StudioFilterType.All;
-            AniDbRateLimit = 2000;
+            AniDbRateLimit = 30;
             AniDbReplaceGraves = true;
             AniListShowSpoilerTags = true;
             UseAnitomyLibrary = false;
