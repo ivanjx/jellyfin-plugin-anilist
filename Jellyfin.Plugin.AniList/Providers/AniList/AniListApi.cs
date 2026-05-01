@@ -11,6 +11,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Extensions;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Jellyfin.Plugin.AniList.Providers.AniList
 {
@@ -210,7 +211,7 @@ namespace Jellyfin.Plugin.AniList.Providers.AniList
 
         public AniListApi(ILogger logger = null)
         {
-            _logger = logger;
+            _logger = logger ?? NullLogger.Instance;
         }
 
         /// <summary>
@@ -318,8 +319,6 @@ namespace Jellyfin.Plugin.AniList.Providers.AniList
         {
             var httpClient = Plugin.Instance.GetHttpClient();
             var requestBody = JsonSerializer.Serialize(request);
-            string responseBody = null;
-            bool success = false;
             var requestsPerMinute = Plugin.Instance.Configuration.AniDbRateLimit;
             var delayBetweenRequests = requestsPerMinute > 0 ?
                 TimeSpan.FromMinutes(1d / requestsPerMinute) :
@@ -337,7 +336,7 @@ namespace Jellyfin.Plugin.AniList.Providers.AniList
                         var rateLimitDelay = delayBetweenRequests - (DateTimeOffset.UtcNow - _lastRequestAt);
                         if (rateLimitDelay > TimeSpan.Zero)
                         {
-                            _logger?.LogInformation("Waiting {Delay} ms for rate limit.", rateLimitDelay.TotalMilliseconds);
+                            _logger.LogInformation("Waiting {Delay} ms for rate limit.", rateLimitDelay.TotalMilliseconds);
                             await Task.Delay(rateLimitDelay, cancellationToken).ConfigureAwait(false);
                         }
                     }
@@ -345,13 +344,12 @@ namespace Jellyfin.Plugin.AniList.Providers.AniList
                     _lastRequestAt = DateTimeOffset.UtcNow;
                     using HttpContent content = new StringContent(requestBody, Encoding.UTF8, "application/json");
                     using var response = await httpClient.PostAsync(BaseApiUrl, content, cancellationToken).ConfigureAwait(false);
-                    responseBody = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-                    success = response.IsSuccessStatusCode;
+                    var responseBody = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
 
-                    if (success ||
+                    if (response.IsSuccessStatusCode ||
                         response.StatusCode != HttpStatusCode.TooManyRequests)
                     {
-                        break;
+                        return await JsonSerializer.DeserializeAsync<RootObject>(responseBody, cancellationToken: cancellationToken).ConfigureAwait(false);
                     }
 
                     // Got HTTP 429 response
@@ -369,33 +367,18 @@ namespace Jellyfin.Plugin.AniList.Providers.AniList
                         retryDelay = TimeSpan.FromSeconds(60);
                     }
 
-                    _logger?.LogInformation("Rate limited by AniList API. Retrying after {RetryDelay} ms.", retryDelay.TotalMilliseconds);
+                    _logger.LogInformation("Rate limited by AniList API. Retrying after {RetryDelay} ms.", retryDelay.TotalMilliseconds);
                     await Task.Delay(retryDelay, cancellationToken).ConfigureAwait(false);
                 }
+
+                // Still getting 429 after retrying, give up
+                _logger.LogWarning("Failed to make request to AniList API after retrying due to rate limits. Giving up.");
+                return null;
             }
             finally
             {
                 _rateLimitLock.Release();
             }
-
-            if (!success)
-            {
-                return new RootObject();
-            }
-
-            if (string.IsNullOrWhiteSpace(responseBody))
-            {
-                return new RootObject();
-            }
-
-            RootObject result = JsonSerializer.Deserialize<RootObject>(responseBody);
-
-            if (result is null)
-            {
-                return new RootObject();
-            }
-
-            return result;
         }
     }
 }
