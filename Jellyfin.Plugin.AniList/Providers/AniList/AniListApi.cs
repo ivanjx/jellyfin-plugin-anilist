@@ -8,10 +8,14 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading;
+using System.Threading.RateLimiting;
 using System.Threading.Tasks;
 using Jellyfin.Extensions;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using Polly;
+using Polly.RateLimiting;
+using Polly.Retry;
 
 namespace Jellyfin.Plugin.AniList.Providers.AniList
 {
@@ -24,8 +28,8 @@ namespace Jellyfin.Plugin.AniList.Providers.AniList
     public class AniListApi
     {
         private const string BaseApiUrl = "https://graphql.anilist.co/";
-        private static readonly SemaphoreSlim _rateLimitLock = new(1, 1);
-        private static DateTimeOffset _lastRequestAt = DateTimeOffset.MinValue;
+        private static readonly Lazy<TokenBucketRateLimiter> _rateLimiter =
+            new(CreateRateLimiter, LazyThreadSafetyMode.ExecutionAndPublication);
         private readonly ILogger _logger;
 
         private const string SearchAnimeGraphqlQuery = """
@@ -319,66 +323,94 @@ namespace Jellyfin.Plugin.AniList.Providers.AniList
         {
             var httpClient = Plugin.Instance.GetHttpClient();
             var requestBody = JsonSerializer.Serialize(request);
-            var requestsPerMinute = Plugin.Instance.Configuration.AniDbRateLimit;
-            var delayBetweenRequests = requestsPerMinute > 0 ?
-                TimeSpan.FromMinutes(1d / requestsPerMinute) :
-                TimeSpan.Zero;
-
-            await _rateLimitLock.WaitAsync(cancellationToken).ConfigureAwait(false);
-
-            try
-            {
-                for (var attempt = 0; attempt < 2; attempt++)
+            using var response = await CreatePipeline().ExecuteAsync(
+                async ct =>
                 {
-                    if (delayBetweenRequests > TimeSpan.Zero &&
-                        _lastRequestAt > DateTimeOffset.MinValue)
-                    {
-                        var rateLimitDelay = delayBetweenRequests - (DateTimeOffset.UtcNow - _lastRequestAt);
-                        if (rateLimitDelay > TimeSpan.Zero)
-                        {
-                            _logger.LogInformation("Waiting {Delay} ms for rate limit.", rateLimitDelay.TotalMilliseconds);
-                            await Task.Delay(rateLimitDelay, cancellationToken).ConfigureAwait(false);
-                        }
-                    }
-
-                    _lastRequestAt = DateTimeOffset.UtcNow;
                     using HttpContent content = new StringContent(requestBody, Encoding.UTF8, "application/json");
-                    using var response = await httpClient.PostAsync(BaseApiUrl, content, cancellationToken).ConfigureAwait(false);
-                    var responseBody = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+                    return await httpClient.PostAsync(BaseApiUrl, content, ct).ConfigureAwait(false);
+                },
+                cancellationToken
+            ).ConfigureAwait(false);
 
-                    if (response.IsSuccessStatusCode ||
-                        response.StatusCode != HttpStatusCode.TooManyRequests)
-                    {
-                        return await JsonSerializer.DeserializeAsync<RootObject>(responseBody, cancellationToken: cancellationToken).ConfigureAwait(false);
-                    }
-
-                    // Got HTTP 429 response
-                    var delay = response.Headers.RetryAfter?.Delta;
-                    if (delay is null &&
-                        response.Headers.RetryAfter?.Date is { } retryAfterDate)
-                    {
-                        delay = retryAfterDate - DateTimeOffset.UtcNow;
-                    }
-
-                    var retryDelay = delay.GetValueOrDefault(TimeSpan.FromSeconds(60));
-                    if (retryDelay <= TimeSpan.Zero)
-                    {
-                        // If the Retry-After header is missing or invalid, default to a 60 second delay
-                        retryDelay = TimeSpan.FromSeconds(60);
-                    }
-
-                    _logger.LogInformation("Rate limited by AniList API. Retrying after {RetryDelay} ms.", retryDelay.TotalMilliseconds);
-                    await Task.Delay(retryDelay, cancellationToken).ConfigureAwait(false);
-                }
-
-                // Still getting 429 after retrying, give up
+            if (response.StatusCode == HttpStatusCode.TooManyRequests)
+            {
                 _logger.LogWarning("Failed to make request to AniList API after retrying due to rate limits. Giving up.");
                 return null;
             }
-            finally
+
+            using var responseStream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+            return await JsonSerializer.DeserializeAsync<RootObject>(responseStream, cancellationToken: cancellationToken).ConfigureAwait(false);
+        }
+
+        private ResiliencePipeline<HttpResponseMessage> CreatePipeline()
+        {
+            var builder = new ResiliencePipelineBuilder<HttpResponseMessage>()
+                .AddRetry(new RetryStrategyOptions<HttpResponseMessage>
+                {
+                    // Handle HTTP 429 once
+                    ShouldHandle = new PredicateBuilder<HttpResponseMessage>().HandleResult(response =>
+                        response.StatusCode == HttpStatusCode.TooManyRequests),
+                    MaxRetryAttempts = 1,
+                    DelayGenerator = args => new ValueTask<TimeSpan?>(GetRetryDelay(args.Outcome.Result)),
+                    OnRetry = args =>
+                    {
+                        args.Outcome.Result?.Dispose();
+                        _logger.LogInformation("Rate limited by AniList API. Retrying after {RetryDelay} ms.", args.RetryDelay.TotalMilliseconds);
+                        return default;
+                    },
+                });
+
+            var rateLimiter = GetRateLimiter();
+            if (rateLimiter is not null)
             {
-                _rateLimitLock.Release();
+                builder.AddRateLimiter(rateLimiter);
             }
+
+            return builder.Build();
+        }
+
+        private static TimeSpan GetRetryDelay(HttpResponseMessage response)
+        {
+            var delay = response.Headers.RetryAfter?.Delta;
+            if (delay is null &&
+                response.Headers.RetryAfter?.Date is { } retryAfterDate)
+            {
+                delay = retryAfterDate - DateTimeOffset.UtcNow;
+            }
+
+            var retryDelay = delay.GetValueOrDefault(TimeSpan.FromSeconds(60));
+            if (retryDelay <= TimeSpan.Zero)
+            {
+                retryDelay = TimeSpan.FromSeconds(60);
+            }
+
+            return retryDelay;
+        }
+
+        private static TokenBucketRateLimiter GetRateLimiter()
+        {
+            var requestsPerMinute = Plugin.Instance.Configuration.AniDbRateLimit;
+            if (requestsPerMinute <= 0)
+            {
+                return null;
+            }
+
+            return _rateLimiter.Value;
+        }
+
+        private static TokenBucketRateLimiter CreateRateLimiter()
+        {
+            var requestsPerMinute = Plugin.Instance.Configuration.AniDbRateLimit;
+            return new TokenBucketRateLimiter(new TokenBucketRateLimiterOptions
+            {
+                // Evenly spaced requests instead of bursty
+                AutoReplenishment = true,
+                QueueLimit = int.MaxValue,
+                QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
+                ReplenishmentPeriod = TimeSpan.FromMinutes(1d / requestsPerMinute),
+                TokenLimit = 1,
+                TokensPerPeriod = 1,
+            });
         }
     }
 }

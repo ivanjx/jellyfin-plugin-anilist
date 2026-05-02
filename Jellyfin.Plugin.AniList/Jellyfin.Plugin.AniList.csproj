@@ -10,6 +10,8 @@
     <PackageReference Include="Microsoft.Extensions.Http" Version="9.0.11" />
     <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="9.0.11" />
     <PackageReference Include="AnitomySharp.NET6" Version="0.5.1" />
+    <PackageReference Include="Polly" Version="8.6.6" />
+    <PackageReference Include="Polly.RateLimiting" Version="8.6.6" />
   </ItemGroup>
 
   <ItemGroup>
