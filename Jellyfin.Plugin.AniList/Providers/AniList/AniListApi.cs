@@ -14,7 +14,6 @@ using Jellyfin.Extensions;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Polly;
-using Polly.RateLimiting;
 using Polly.Retry;
 
 namespace Jellyfin.Plugin.AniList.Providers.AniList
@@ -28,8 +27,9 @@ namespace Jellyfin.Plugin.AniList.Providers.AniList
     public class AniListApi
     {
         private const string BaseApiUrl = "https://graphql.anilist.co/";
-        private static readonly Lazy<TokenBucketRateLimiter> _rateLimiter =
-            new(CreateRateLimiter, LazyThreadSafetyMode.ExecutionAndPublication);
+        private static readonly object _rateLimiterLock = new();
+        private static TokenBucketRateLimiter _rateLimiter;
+        private static int _rateLimiterRequestsPerMinute;
         private readonly ILogger _logger;
 
         private const string SearchAnimeGraphqlQuery = """
@@ -395,12 +395,14 @@ namespace Jellyfin.Plugin.AniList.Providers.AniList
             if (delay is null &&
                 response.Headers.RetryAfter?.Date is { } retryAfterDate)
             {
+                // Use the Retry-After date header
                 delay = retryAfterDate - DateTimeOffset.UtcNow;
             }
 
-            var retryDelay = delay.GetValueOrDefault(TimeSpan.FromSeconds(60));
+            var retryDelay = delay ?? TimeSpan.Zero;
             if (retryDelay <= TimeSpan.Zero)
             {
+                // Default to 60 seconds if the header is missing
                 retryDelay = TimeSpan.FromSeconds(60);
             }
 
@@ -412,15 +414,27 @@ namespace Jellyfin.Plugin.AniList.Providers.AniList
             var requestsPerMinute = Plugin.Instance.Configuration.AniDbRateLimit;
             if (requestsPerMinute <= 0)
             {
+                // Rate limiting disabled
                 return null;
             }
 
-            return _rateLimiter.Value;
+            lock (_rateLimiterLock)
+            {
+                if (_rateLimiter is not null &&
+                    _rateLimiterRequestsPerMinute == requestsPerMinute)
+                {
+                    return _rateLimiter;
+                }
+
+                // Rate limit configuration has changed, create a new rate limiter
+                _rateLimiterRequestsPerMinute = requestsPerMinute;
+                _rateLimiter = CreateRateLimiter(requestsPerMinute);
+                return _rateLimiter;
+            }
         }
 
-        private static TokenBucketRateLimiter CreateRateLimiter()
+        private static TokenBucketRateLimiter CreateRateLimiter(int requestsPerMinute)
         {
-            var requestsPerMinute = Plugin.Instance.Configuration.AniDbRateLimit;
             return new TokenBucketRateLimiter(new TokenBucketRateLimiterOptions
             {
                 // Evenly spaced requests instead of bursty
