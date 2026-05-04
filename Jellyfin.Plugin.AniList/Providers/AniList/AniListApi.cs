@@ -319,66 +319,74 @@ namespace Jellyfin.Plugin.AniList.Providers.AniList
         {
             var httpClient = Plugin.Instance.GetHttpClient();
             var requestBody = JsonSerializer.Serialize(request);
-            var requestsPerMinute = Plugin.Instance.Configuration.AniDbRateLimit;
-            var delayBetweenRequests = requestsPerMinute > 0 ?
-                TimeSpan.FromMinutes(1d / requestsPerMinute) :
-                TimeSpan.Zero;
 
+            for (var attempt = 0; attempt < 2; attempt++)
+            {
+                await WaitForConfiguredRateLimit(cancellationToken).ConfigureAwait(false);
+
+                using HttpContent content = new StringContent(requestBody, Encoding.UTF8, "application/json");
+                using var response = await httpClient.PostAsync(BaseApiUrl, content, cancellationToken).ConfigureAwait(false);
+
+                if (response.StatusCode == HttpStatusCode.TooManyRequests)
+                {
+                    var retryDelay = GetRateLimitRetryDelay(response);
+                    _logger.LogInformation("Rate limited by AniList API. Retrying after {RetryDelay} ms.", retryDelay.TotalMilliseconds);
+                    await Task.Delay(retryDelay, cancellationToken).ConfigureAwait(false);
+                    continue; // Retry one more time after the HTTP 429 delay
+                }
+
+                using var responseStream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+                return await JsonSerializer.DeserializeAsync<RootObject>(responseStream, cancellationToken: cancellationToken).ConfigureAwait(false);
+            }
+
+            _logger.LogWarning("Failed to make request to AniList API after retrying due to rate limits. Giving up.");
+            return null;
+        }
+
+        private async Task WaitForConfiguredRateLimit(CancellationToken cancellationToken)
+        {
+            var requestsPerMinute = Plugin.Instance.Configuration.AniDbRateLimit;
+            if (requestsPerMinute <= 0)
+            {
+                return;
+            }
+
+            var delayBetweenRequests = TimeSpan.FromMinutes(1d / requestsPerMinute);
             await _rateLimitLock.WaitAsync(cancellationToken).ConfigureAwait(false);
 
             try
             {
-                for (var attempt = 0; attempt < 2; attempt++)
+                if (_lastRequestAt > DateTimeOffset.MinValue)
                 {
-                    if (delayBetweenRequests > TimeSpan.Zero &&
-                        _lastRequestAt > DateTimeOffset.MinValue)
+                    var rateLimitDelay = delayBetweenRequests - (DateTimeOffset.UtcNow - _lastRequestAt);
+                    if (rateLimitDelay > TimeSpan.Zero)
                     {
-                        var rateLimitDelay = delayBetweenRequests - (DateTimeOffset.UtcNow - _lastRequestAt);
-                        if (rateLimitDelay > TimeSpan.Zero)
-                        {
-                            _logger.LogInformation("Waiting {Delay} ms for rate limit.", rateLimitDelay.TotalMilliseconds);
-                            await Task.Delay(rateLimitDelay, cancellationToken).ConfigureAwait(false);
-                        }
+                        _logger.LogInformation("Waiting {Delay} ms for rate limit.", rateLimitDelay.TotalMilliseconds);
+                        await Task.Delay(rateLimitDelay, cancellationToken).ConfigureAwait(false);
                     }
-
-                    _lastRequestAt = DateTimeOffset.UtcNow;
-                    using HttpContent content = new StringContent(requestBody, Encoding.UTF8, "application/json");
-                    using var response = await httpClient.PostAsync(BaseApiUrl, content, cancellationToken).ConfigureAwait(false);
-                    var responseBody = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-
-                    if (response.IsSuccessStatusCode ||
-                        response.StatusCode != HttpStatusCode.TooManyRequests)
-                    {
-                        return await JsonSerializer.DeserializeAsync<RootObject>(responseBody, cancellationToken: cancellationToken).ConfigureAwait(false);
-                    }
-
-                    // Got HTTP 429 response
-                    var delay = response.Headers.RetryAfter?.Delta;
-                    if (delay is null &&
-                        response.Headers.RetryAfter?.Date is { } retryAfterDate)
-                    {
-                        delay = retryAfterDate - DateTimeOffset.UtcNow;
-                    }
-
-                    var retryDelay = delay.GetValueOrDefault(TimeSpan.FromSeconds(60));
-                    if (retryDelay <= TimeSpan.Zero)
-                    {
-                        // If the Retry-After header is missing or invalid, default to a 60 second delay
-                        retryDelay = TimeSpan.FromSeconds(60);
-                    }
-
-                    _logger.LogInformation("Rate limited by AniList API. Retrying after {RetryDelay} ms.", retryDelay.TotalMilliseconds);
-                    await Task.Delay(retryDelay, cancellationToken).ConfigureAwait(false);
                 }
 
-                // Still getting 429 after retrying, give up
-                _logger.LogWarning("Failed to make request to AniList API after retrying due to rate limits. Giving up.");
-                return null;
+                _lastRequestAt = DateTimeOffset.UtcNow;
             }
             finally
             {
                 _rateLimitLock.Release();
             }
+        }
+
+        private static TimeSpan GetRateLimitRetryDelay(HttpResponseMessage response)
+        {
+            var delay = response.Headers.RetryAfter?.Delta;
+            if (delay is null &&
+                response.Headers.RetryAfter?.Date is { } retryAfterDate)
+            {
+                delay = retryAfterDate - DateTimeOffset.UtcNow;
+            }
+
+            var retryDelay = delay ?? TimeSpan.Zero;
+            return retryDelay > TimeSpan.Zero ?
+                retryDelay :
+                TimeSpan.FromSeconds(60); // Fallback to 60 seconds if not supplied
         }
     }
 }
