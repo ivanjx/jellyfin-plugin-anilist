@@ -22,7 +22,7 @@ namespace Jellyfin.Plugin.AniList.Providers.AniList
         public AniListMovieProvider(ILogger<AniListMovieProvider> logger)
         {
             _log = logger;
-            _aniListApi = new AniListApi();
+            _aniListApi = new AniListApi(logger);
         }
 
         public async Task<MetadataResult<Movie>> GetMetadata(MovieInfo info, CancellationToken cancellationToken)

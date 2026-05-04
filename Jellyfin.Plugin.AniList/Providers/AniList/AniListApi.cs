@@ -1,6 +1,8 @@
+using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Net;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
@@ -8,6 +10,8 @@ using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Extensions;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Jellyfin.Plugin.AniList.Providers.AniList
 {
@@ -20,6 +24,9 @@ namespace Jellyfin.Plugin.AniList.Providers.AniList
     public class AniListApi
     {
         private const string BaseApiUrl = "https://graphql.anilist.co/";
+        private static readonly SemaphoreSlim _rateLimitLock = new(1, 1);
+        private static DateTimeOffset _lastRequestAt = DateTimeOffset.MinValue;
+        private readonly ILogger _logger;
 
         private const string SearchAnimeGraphqlQuery = """
             query ($query: String) {
@@ -202,6 +209,11 @@ namespace Jellyfin.Plugin.AniList.Providers.AniList
             public Dictionary<string, string> Variables { get; set; }
         }
 
+        public AniListApi(ILogger logger = null)
+        {
+            _logger = logger ?? NullLogger.Instance;
+        }
+
         /// <summary>
         /// API call to get the anime with the given id
         /// </summary>
@@ -306,12 +318,75 @@ namespace Jellyfin.Plugin.AniList.Providers.AniList
         private async Task<RootObject> WebRequestAPI(GraphQlRequest request, CancellationToken cancellationToken)
         {
             var httpClient = Plugin.Instance.GetHttpClient();
+            var requestBody = JsonSerializer.Serialize(request);
 
-            using HttpContent content = new StringContent(JsonSerializer.Serialize(request), Encoding.UTF8, "application/json");
-            using var response = await httpClient.PostAsync(BaseApiUrl, content, cancellationToken).ConfigureAwait(false);
-            using var responseStream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+            for (var attempt = 0; attempt < 2; attempt++)
+            {
+                await WaitForConfiguredRateLimit(cancellationToken).ConfigureAwait(false);
 
-            return await JsonSerializer.DeserializeAsync<RootObject>(responseStream, cancellationToken: cancellationToken).ConfigureAwait(false);
+                using HttpContent content = new StringContent(requestBody, Encoding.UTF8, "application/json");
+                using var response = await httpClient.PostAsync(BaseApiUrl, content, cancellationToken).ConfigureAwait(false);
+
+                if (response.StatusCode == HttpStatusCode.TooManyRequests)
+                {
+                    var retryDelay = GetRateLimitRetryDelay(response);
+                    _logger.LogInformation("Rate limited by AniList API. Retrying after {RetryDelay} ms.", retryDelay.TotalMilliseconds);
+                    await Task.Delay(retryDelay, cancellationToken).ConfigureAwait(false);
+                    continue; // Retry one more time after the HTTP 429 delay
+                }
+
+                using var responseStream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+                return await JsonSerializer.DeserializeAsync<RootObject>(responseStream, cancellationToken: cancellationToken).ConfigureAwait(false);
+            }
+
+            _logger.LogWarning("Failed to make request to AniList API after retrying due to rate limits. Giving up.");
+            return null;
+        }
+
+        private async Task WaitForConfiguredRateLimit(CancellationToken cancellationToken)
+        {
+            var requestsPerMinute = Plugin.Instance.Configuration.AniDbRateLimit;
+            if (requestsPerMinute <= 0)
+            {
+                return;
+            }
+
+            var delayBetweenRequests = TimeSpan.FromMinutes(1d / requestsPerMinute);
+            await _rateLimitLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+
+            try
+            {
+                if (_lastRequestAt > DateTimeOffset.MinValue)
+                {
+                    var rateLimitDelay = delayBetweenRequests - (DateTimeOffset.UtcNow - _lastRequestAt);
+                    if (rateLimitDelay > TimeSpan.Zero)
+                    {
+                        _logger.LogInformation("Waiting {Delay} ms for rate limit.", rateLimitDelay.TotalMilliseconds);
+                        await Task.Delay(rateLimitDelay, cancellationToken).ConfigureAwait(false);
+                    }
+                }
+
+                _lastRequestAt = DateTimeOffset.UtcNow;
+            }
+            finally
+            {
+                _rateLimitLock.Release();
+            }
+        }
+
+        private static TimeSpan GetRateLimitRetryDelay(HttpResponseMessage response)
+        {
+            var delay = response.Headers.RetryAfter?.Delta;
+            if (delay is null &&
+                response.Headers.RetryAfter?.Date is { } retryAfterDate)
+            {
+                delay = retryAfterDate - DateTimeOffset.UtcNow;
+            }
+
+            var retryDelay = delay ?? TimeSpan.Zero;
+            return retryDelay > TimeSpan.Zero ?
+                retryDelay :
+                TimeSpan.FromSeconds(60); // Fallback to 60 seconds if not supplied
         }
     }
 }
