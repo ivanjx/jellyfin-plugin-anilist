@@ -20,6 +20,15 @@
 
 This plugin adds the metadata provider for [AniList](https://anilist.co/).
 
+## Fork customizations
+
+The `mine-upstream` branch is based on upstream `master` and retains these changes from `mine`:
+
+- Do not append the plugin's own User-Agent token; headers supplied by Jellyfin's HTTP client remain unchanged.
+- Log missing anime, staff, and search-list payloads with the requested ID or query. Valid empty search lists do not produce these diagnostics.
+
+Upstream's build targets, rate limiting, role filtering, and banner handling remain unchanged.
+
 ## Installation
 
 [See the official documentation for install instructions](https://jellyfin.org/docs/general/server/plugins/index.html#installing).

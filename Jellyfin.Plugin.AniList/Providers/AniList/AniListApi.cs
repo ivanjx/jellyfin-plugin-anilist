@@ -230,6 +230,11 @@ namespace Jellyfin.Plugin.AniList.Providers.AniList
                 cancellationToken
             ).ConfigureAwait(false);
 
+            if (result?.data?.Media is null)
+            {
+                _logger.LogError("AniList returned no media payload for id {Id}.", id);
+            }
+
             return result?.data?.Media;
         }
 
@@ -259,6 +264,11 @@ namespace Jellyfin.Plugin.AniList.Providers.AniList
                 },
                 cancellationToken
             ).ConfigureAwait(false);
+
+            if (result?.data?.Page?.media is null)
+            {
+                _logger.LogError("AniList search response contained no media list for query {Title}.", title);
+            }
 
             return result?.data?.Page?.media ?? [];
         }
@@ -295,6 +305,11 @@ namespace Jellyfin.Plugin.AniList.Providers.AniList
                 cancellationToken
             ).ConfigureAwait(false);
 
+            if (result?.data?.Staff is null)
+            {
+                _logger.LogError("AniList returned no staff payload for id {Id}.", id);
+            }
+
             return result?.data?.Staff;
         }
 
@@ -307,6 +322,11 @@ namespace Jellyfin.Plugin.AniList.Providers.AniList
                 },
                 cancellationToken
             ).ConfigureAwait(false);
+
+            if (result?.data?.Page?.staff is null)
+            {
+                _logger.LogWarning("AniList search response contained no staff list for query {Query}.", query);
+            }
 
             return result?.data?.Page?.staff ?? [];
         }

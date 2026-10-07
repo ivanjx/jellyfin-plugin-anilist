@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Net.Http;
-using System.Net.Http.Headers;
 using Jellyfin.Plugin.AniList.Configuration;
 using MediaBrowser.Common.Configuration;
 using MediaBrowser.Common.Plugins;
@@ -26,10 +25,7 @@ namespace Jellyfin.Plugin.AniList
         }
 
         public HttpClient GetHttpClient() {
-            var httpClient = _httpClientFactory.CreateClient(NamedClient.Default);
-            httpClient.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue(Name, Version.ToString()));
-
-            return httpClient;
+            return _httpClientFactory.CreateClient(NamedClient.Default);
         }
 
         /// <inheritdoc />
