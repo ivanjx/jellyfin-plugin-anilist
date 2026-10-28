@@ -143,6 +143,7 @@ namespace Jellyfin.Plugin.AniList.Providers.AniList
         public string status { get; set; }
         public StudioConnection studios { get; set; }
         public List<object> synonyms { get; set; }
+        public RecommendationConnection recommendations { get; set; }
         public List<Tag> tags { get; set; }
         public string type { get; set; }
         public object volumes { get; set; }
@@ -491,6 +492,18 @@ namespace Jellyfin.Plugin.AniList.Providers.AniList
     public class StudioConnection
     {
         public List<StudioEdge> edges { get; set; }
+    }
+
+    public class Recommendation
+    {
+        public int? rating { get; set; }
+        public MediaSearchResult mediaRecommendation { get; set; }
+    }
+
+    public class RecommendationConnection
+    {
+        public PageInfo pageInfo { get; set; }
+        public List<Recommendation> nodes { get; set; }
     }
 
     public class GraphQlError

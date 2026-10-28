@@ -64,6 +64,7 @@ namespace Jellyfin.Plugin.AniList.Configuration
             AniDbReplaceGraves = true;
             AniListShowSpoilerTags = true;
             UseAnitomyLibrary = false;
+            SimilarItemsCacheDays = 30;
         }
 
         public TitlePreferenceType TitlePreference { get; set; }
@@ -101,5 +102,11 @@ namespace Jellyfin.Plugin.AniList.Configuration
         public bool AniListShowSpoilerTags { get; set; }
 
         public bool UseAnitomyLibrary { get; set; }
+
+        /// <summary>
+        /// How many days the "More Like This" recommendations fetched from AniList are cached.
+        /// Zero disables caching.
+        /// </summary>
+        public int SimilarItemsCacheDays { get; set; }
     }
 }

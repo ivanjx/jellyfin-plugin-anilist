@@ -109,6 +109,11 @@
                                 <span>Use the Anitomy library to resolve titles</span>
                             </label>
                         </div>
+                        <div class="inputContainer">
+                            <label class="inputLabel inputLabelUnfocused" for="txtSimilarItemsCacheDays">Similar Items Cache Duration (days)</label>
+                            <input id="txtSimilarItemsCacheDays" name="txtSimilarItemsCacheDays" type="number" is="emby-input" min="0" max="365" />
+                            <div class="fieldDescription">Number of days to cache "More Like This" recommendations from AniList. Set to 0 to disable caching.</div>
+                        </div>
                         <div>
                             <button is="emby-button" type="submit" class="raised button-submit block emby-button">
                                 <span>Save</span>
@@ -141,6 +146,7 @@
                             document.getElementById('chkAniDbReplaceGraves').checked = config.AniDbReplaceGraves;
                             document.getElementById('chkAniListShowSpoilerTags').checked = config.AniListShowSpoilerTags;
                             document.getElementById('chkUseAnitomyLibrary').checked = config.UseAnitomyLibrary;
+                            document.getElementById('txtSimilarItemsCacheDays').value = config.SimilarItemsCacheDays;
 
                             Dashboard.hideLoadingMsg();
                         });
@@ -165,6 +171,7 @@
                             config.AniDbReplaceGraves = document.getElementById('chkAniDbReplaceGraves').checked;
                             config.AniListShowSpoilerTags = document.getElementById('chkAniListShowSpoilerTags').checked;
                             config.UseAnitomyLibrary = document.getElementById('chkUseAnitomyLibrary').checked;
+                            config.SimilarItemsCacheDays = parseInt(document.getElementById('txtSimilarItemsCacheDays').value, 10) || 0;
 
                             ApiClient.updatePluginConfiguration(AniListConfigurationPage.pluginUniqueId, config).then(function (result) {
                                 Dashboard.processPluginConfigurationUpdateResult(result);

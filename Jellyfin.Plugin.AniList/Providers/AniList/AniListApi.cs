@@ -202,6 +202,24 @@ namespace Jellyfin.Plugin.AniList.Providers.AniList
             }
         """;
 
+        private const string GetRecommendationsGraphqlQuery = """
+            query($id: Int!, $page: Int) {
+              Media(id: $id, type: ANIME) {
+                recommendations(page: $page, perPage: 50, sort: [RATING_DESC, ID]) {
+                  pageInfo {
+                    hasNextPage
+                  }
+                  nodes {
+                    rating
+                    mediaRecommendation {
+                      id
+                    }
+                  }
+                }
+              }
+            }
+        """;
+
         private class GraphQlRequest {
             [JsonPropertyName("query")]
             public string Query { get; set; }
@@ -309,6 +327,29 @@ namespace Jellyfin.Plugin.AniList.Providers.AniList
             ).ConfigureAwait(false);
 
             return result?.data?.Page?.staff ?? [];
+        }
+
+        /// <summary>
+        /// API call to get a page of user recommendations for the anime with the given id, best rated first
+        /// </summary>
+        /// <param name="id"></param>
+        /// <param name="page">1-based page number</param>
+        /// <param name="cancellationToken"></param>
+        /// <returns></returns>
+        public async Task<RecommendationConnection> GetRecommendations(string id, int page, CancellationToken cancellationToken)
+        {
+            RootObject result = await WebRequestAPI(
+                new GraphQlRequest {
+                    Query = GetRecommendationsGraphqlQuery,
+                    Variables = new Dictionary<string, string> {
+                        {"id", id},
+                        {"page", page.ToString(CultureInfo.InvariantCulture)},
+                    },
+                },
+                cancellationToken
+            ).ConfigureAwait(false);
+
+            return result?.data?.Media?.recommendations;
         }
 
         /// <summary>
